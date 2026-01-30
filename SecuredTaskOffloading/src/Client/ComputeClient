@@ -1,0 +1,238 @@
+package Client;
+
+import Contract.*;
+import Security.*;
+import Tasks.*;
+import java.io.*;
+import java.net.*;
+import java.security.*;
+import javax.crypto.SecretKey;
+
+/**
+ * Main client application for remote task offloading
+ * Connects to server, authenticates, and sends tasks for execution
+ */
+public class ComputeClient {
+    
+    private String serverHost;
+    private int serverPort;
+    private String userName;
+    
+    private Socket socket;
+    private ObjectOutputStream out;
+    private ObjectInputStream in;
+    
+    private ClientAuthenticator authenticator;
+    private SecretKey sessionKey;
+    private boolean authenticated;
+    
+    /**
+     * Constructor
+     * @param serverHost Server IP address (e.g., "localhost")
+     * @param serverPort Server port (e.g., 8888)
+     * @param userName Client username (e.g., "Stephen_Smith")
+     */
+    public ComputeClient(String serverHost, int serverPort, String userName) {
+        this.serverHost = serverHost;
+        this.serverPort = serverPort;
+        this.userName = userName;
+        this.authenticated = false;
+    }
+    
+    /**
+     * Connect to the server
+     */
+    public void connect() throws Exception {
+        System.out.println("Connecting to server at " + serverHost + ":" + serverPort);
+        socket = new Socket(serverHost, serverPort);
+        
+        // IMPORTANT: Create output stream BEFORE input stream to avoid deadlock
+        out = new ObjectOutputStream(socket.getOutputStream());
+        out.flush();
+        in = new ObjectInputStream(socket.getInputStream());
+        
+        System.out.println("✓ Connected to server");
+    }
+    
+    /**
+     * Perform mutual authentication with server
+     */
+    public void authenticate() throws Exception {
+        System.out.println("\n========================================");
+        System.out.println("STARTING MUTUAL AUTHENTICATION");
+        System.out.println("========================================");
+        
+        // Load client's key pair
+        KeyPair clientKeyPair = KeyManager.loadKeyPair(userName);
+        System.out.println("Loaded client key pair for: " + userName);
+        
+        // Load server's public key
+        PublicKey serverPublicKey = KeyManager.loadPublicKey("CENTRE");
+        System.out.println("Loaded server public key");
+        
+        // Create authenticator
+        authenticator = new ClientAuthenticator(userName, clientKeyPair, serverPublicKey);
+        
+        // STEP 1: Create and send client authenticator
+        CSAuthenticator clientAuth = authenticator.createClientAuthenticator();
+        out.writeObject(clientAuth);
+        out.flush();
+        System.out.println("Sent client authenticator to server");
+        
+        // STEPS 2-5: Wait for server's response
+        System.out.println("\nWaiting for server response...");
+        CSAuthenticator serverAuth = (CSAuthenticator) in.readObject();
+        System.out.println("Received server authenticator");
+        
+        // STEPS 6-9: Validate server and get session key
+        if (authenticator.validateServerAuthenticator(serverAuth)) {
+            sessionKey = authenticator.getSessionKey();
+            authenticated = true;
+            System.out.println("========================================");
+            System.out.println("AUTHENTICATION COMPLETE");
+            System.out.println("========================================\n");
+        } else {
+            throw new SecurityException("Server authentication failed!");
+        }
+    }
+    
+    /**
+     * Upload a class file to the server (encrypted)
+     */
+    public void uploadClassFile(String className) throws Exception {
+        if (!authenticated) {
+            throw new SecurityException("Must authenticate before uploading files");
+        }
+        
+        System.out.println("\n--- Uploading class file: " + className + " ---");
+        
+        // Read the .class file
+        String classFilePath = "build/classes/Tasks/" + className + ".class";
+        File classFile = new File(classFilePath);
+        
+        if (!classFile.exists()) {
+            throw new FileNotFoundException("Class file not found: " + classFilePath);
+        }
+        
+        FileInputStream fis = new FileInputStream(classFile);
+        byte[] fileContent = fis.readAllBytes();
+        fis.close();
+        
+        // Create CFile object
+        CFile cfile = new CFile(className + ".class", fileContent);
+        System.out.println("Read class file: " + cfile.getFileName() + 
+                          " (" + cfile.getFileSize() + " bytes)");
+        
+        // Encrypt the CFile object
+        byte[] encryptedCFile = CryptoUtil.encryptObject(cfile, sessionKey);
+        System.out.println("Encrypted class file (" + encryptedCFile.length + " bytes)");
+        
+        // Send encrypted CFile
+        out.writeObject(encryptedCFile);
+        out.flush();
+        System.out.println("✓ Class file uploaded successfully\n");
+    }
+    
+    /**
+     * Send a task to the server for execution (encrypted)
+     */
+    public Object executeTask(Task task) throws Exception {
+        if (!authenticated) {
+            throw new SecurityException("Must authenticate before executing tasks");
+        }
+        
+        System.out.println("\n--- Executing task: " + task.getDescription() + " ---");
+        
+        // Encrypt the task object
+        byte[] encryptedTask = CryptoUtil.encryptObject(task, sessionKey);
+        System.out.println("Encrypted task (" + encryptedTask.length + " bytes)");
+        
+        // Send encrypted task
+        out.writeObject(encryptedTask);
+        out.flush();
+        System.out.println("Sent encrypted task to server");
+        
+        // Receive encrypted result
+        System.out.println("Waiting for result...");
+        byte[] encryptedResult = (byte[]) in.readObject();
+        System.out.println("Received encrypted result (" + encryptedResult.length + " bytes)");
+        
+        // Decrypt result
+        Object result = CryptoUtil.decryptObject(encryptedResult, sessionKey);
+        System.out.println("✓ Result decrypted");
+        
+        return result;
+    }
+    
+    /**
+     * Disconnect from server
+     */
+    public void disconnect() throws Exception {
+        if (in != null) in.close();
+        if (out != null) out.close();
+        if (socket != null) socket.close();
+        System.out.println("\n✓ Disconnected from server");
+    }
+    
+    /**
+     * Main method - Example usage
+     */
+    public static void main(String[] args) {
+        ComputeClient client = null;
+        
+        try {
+            // Create client (change username to "Michael_Fox" for second client)
+            client = new ComputeClient("localhost", 8888, "Stephen_Smith");
+            
+            // Connect to server
+            client.connect();
+            
+            // Authenticate
+            client.authenticate();
+            
+            // Upload task class files
+            System.out.println("\n========================================");
+            System.out.println("UPLOADING TASK CLASS FILES");
+            System.out.println("========================================");
+            client.uploadClassFile("FactorizationTask");
+            client.uploadClassFile("FibonacciTask");
+            client.uploadClassFile("PerfectNumberTask");
+            
+            // Execute tasks
+            System.out.println("\n========================================");
+            System.out.println("EXECUTING TASKS");
+            System.out.println("========================================");
+            
+            // Task 1: Factorization
+            Task task1 = new FactorizationTask(60);
+            Object result1 = client.executeTask(task1);
+            System.out.println("RESULT: " + result1);
+            
+            // Task 2: Fibonacci
+            Task task2 = new FibonacciTask(10);
+            Object result2 = client.executeTask(task2);
+            System.out.println("RESULT: " + result2);
+            
+            // Task 3: Perfect Number
+            Task task3 = new PerfectNumberTask(28);
+            Object result3 = client.executeTask(task3);
+            System.out.println("RESULT: " + result3);
+            
+            System.out.println("\n========================================");
+            System.out.println("ALL TASKS COMPLETED SUCCESSFULLY");
+            System.out.println("========================================");
+            
+        } catch (Exception e) {
+            System.err.println("Error: " + e.getMessage());
+            e.printStackTrace();
+        } finally {
+            try {
+                if (client != null) {
+                    client.disconnect();
+                }
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        }
+    }
+}
